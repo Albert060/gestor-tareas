@@ -1,18 +1,29 @@
-import { mapUser, query } from "@/lib/db";
-import { jsonOk, jsonError, handleDatabaseError } from "@/lib/api-helpers";
+import { requireUser } from "@/lib/auth";
+import { mapTask, mapUser, query } from "@/lib/db";
+import { taskWithRelationsSelect } from "@/lib/team-queries";
+import { jsonError, jsonOk } from "@/lib/api-helpers";
 
-// GET /api/users/[id] - Detalle de un usuario con sus tareas
 export async function GET(request, { params }) {
+  const { response, user } = await requireUser();
+  if (response) return response;
+
   try {
     const { id } = await params;
 
     const [userRow] = await query(
       `
-        SELECT "id", "name", "email", "createdAt", "updatedAt"
-        FROM "User"
-        WHERE "id" = $1
+        SELECT DISTINCT
+          u."id",
+          u."name",
+          u."email",
+          u."createdAt",
+          u."updatedAt"
+        FROM "TeamMember" own
+        INNER JOIN "TeamMember" visible_member ON visible_member."teamId" = own."teamId"
+        INNER JOIN "User" u ON u."id" = visible_member."userId"
+        WHERE own."userId" = $1 AND u."id" = $2
       `,
-      [id]
+      [user.id, id]
     );
 
     if (!userRow) {
@@ -21,49 +32,22 @@ export async function GET(request, { params }) {
 
     const taskRows = await query(
       `
-        SELECT "id", "title", "status", "priority", "createdAt"
-        FROM "Task"
-        WHERE "userId" = $1
-        ORDER BY "createdAt" DESC
+        ${taskWithRelationsSelect}
+        INNER JOIN "TeamMember" own ON own."teamId" = t."teamId" AND own."userId" = $2
+        WHERE t."assigneeId" = $1
+        ORDER BY t."createdAt" DESC
       `,
-      [id]
+      [id, user.id]
     );
 
     return jsonOk({
       user: {
         ...mapUser(userRow),
-        tasks: taskRows,
+        tasks: taskRows.map(mapTask),
       },
     });
   } catch (error) {
     console.error("[GET /api/users/:id]", error);
-    return jsonError("Error interno del servidor", 500);
-  }
-}
-
-// DELETE /api/users/[id] - Eliminar un usuario
-export async function DELETE(request, { params }) {
-  try {
-    const { id } = await params;
-    const [deleted] = await query(
-      `
-        DELETE FROM "User"
-        WHERE "id" = $1
-        RETURNING "id"
-      `,
-      [id]
-    );
-
-    if (!deleted) {
-      return jsonError("Usuario no encontrado", 404);
-    }
-
-    return jsonOk({ message: "Usuario eliminado correctamente" });
-  } catch (error) {
-    const databaseErr = handleDatabaseError(error);
-    if (databaseErr) return databaseErr;
-
-    console.error("[DELETE /api/users/:id]", error);
     return jsonError("Error interno del servidor", 500);
   }
 }

@@ -1,22 +1,59 @@
+import { requireTeamMember, requireUser } from "@/lib/auth";
 import { createCuid, mapTask, query } from "@/lib/db";
 import {
   createTaskSchema,
   taskPrioritySchema,
   taskStatusSchema,
 } from "@/lib/validations";
-import { jsonOk, jsonError, handleZodError, handleDatabaseError } from "@/lib/api-helpers";
+import { taskWithRelationsSelect } from "@/lib/team-queries";
+import { handleDatabaseError, handleZodError, jsonError, jsonOk } from "@/lib/api-helpers";
 
-// GET /api/tasks - Listar tareas con filtros opcionales
+async function resolveAssignee({ assigneeId, autoAssign, teamId, userId }) {
+  if (autoAssign) {
+    return userId;
+  }
+
+  if (!assigneeId) {
+    return null;
+  }
+
+  const [member] = await query(
+    `
+      SELECT "id"
+      FROM "TeamMember"
+      WHERE "teamId" = $1 AND "userId" = $2
+    `,
+    [teamId, assigneeId]
+  );
+
+  if (!member) {
+    return false;
+  }
+
+  return assigneeId;
+}
+
 export async function GET(request) {
+  const { response, user } = await requireUser();
+  if (response) return response;
+
   try {
     const { searchParams } = new URL(request.url);
+    const teamId = searchParams.get("teamId");
     const status = searchParams.get("status");
     const priority = searchParams.get("priority");
-    const userId = searchParams.get("userId");
+    const assigneeId = searchParams.get("assigneeId");
     const search = searchParams.get("q")?.trim();
 
-    const conditions = [];
-    const params = [];
+    if (!teamId) {
+      return jsonError("El equipo es obligatorio", 400);
+    }
+
+    const forbidden = await requireTeamMember(teamId, user.id);
+    if (forbidden) return forbidden;
+
+    const conditions = ['t."teamId" = $1'];
+    const params = [teamId];
 
     if (status) {
       const parsedStatus = taskStatusSchema.safeParse(status);
@@ -38,9 +75,9 @@ export async function GET(request) {
       conditions.push(`t."priority" = $${params.length}`);
     }
 
-    if (userId) {
-      params.push(userId);
-      conditions.push(`t."userId" = $${params.length}`);
+    if (assigneeId) {
+      params.push(assigneeId);
+      conditions.push(`t."assigneeId" = $${params.length}`);
     }
 
     if (search) {
@@ -52,23 +89,8 @@ export async function GET(request) {
 
     const rows = await query(
       `
-        SELECT
-          t."id",
-          t."title",
-          t."description",
-          t."status",
-          t."priority",
-          t."createdAt",
-          t."updatedAt",
-          t."userId",
-          u."id" AS "user_id",
-          u."name" AS "user_name",
-          u."email" AS "user_email",
-          u."createdAt" AS "user_createdAt",
-          u."updatedAt" AS "user_updatedAt"
-        FROM "Task" t
-        LEFT JOIN "User" u ON u."id" = t."userId"
-        ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+        ${taskWithRelationsSelect}
+        WHERE ${conditions.join(" AND ")}
         ORDER BY t."createdAt" DESC
       `,
       params
@@ -81,24 +103,29 @@ export async function GET(request) {
   }
 }
 
-// POST /api/tasks - Crear una tarea nueva
 export async function POST(request) {
+  const { response, user } = await requireUser();
+  if (response) return response;
+
   try {
-    const body = await request.json();
-    const parsed = createTaskSchema.safeParse(body);
+    const parsed = createTaskSchema.safeParse(await request.json());
 
     if (!parsed.success) {
       return handleZodError(parsed.error);
     }
 
-    if (parsed.data.userId) {
-      const [userExists] = await query('SELECT "id" FROM "User" WHERE "id" = $1', [
-        parsed.data.userId,
-      ]);
+    const forbidden = await requireTeamMember(parsed.data.teamId, user.id);
+    if (forbidden) return forbidden;
 
-      if (!userExists) {
-        return jsonError("El usuario asignado no existe", 400);
-      }
+    const assigneeId = await resolveAssignee({
+      assigneeId: parsed.data.assigneeId,
+      autoAssign: parsed.data.autoAssign,
+      teamId: parsed.data.teamId,
+      userId: user.id,
+    });
+
+    if (assigneeId === false) {
+      return jsonError("El responsable debe pertenecer al equipo", 400);
     }
 
     const [task] = await query(
@@ -106,41 +133,28 @@ export async function POST(request) {
         WITH inserted AS (
           INSERT INTO "Task" (
             "id",
+            "teamId",
             "title",
             "description",
             "status",
             "priority",
-            "userId",
+            "assigneeId",
             "createdAt",
             "updatedAt"
           )
-          VALUES ($1, $2, $3, $4::"TaskStatus", $5::"TaskPriority", $6, NOW(), NOW())
+          VALUES ($1, $2, $3, $4, $5::"TaskStatus", $6::"TaskPriority", $7, NOW(), NOW())
           RETURNING *
         )
-        SELECT
-          t."id",
-          t."title",
-          t."description",
-          t."status",
-          t."priority",
-          t."createdAt",
-          t."updatedAt",
-          t."userId",
-          u."id" AS "user_id",
-          u."name" AS "user_name",
-          u."email" AS "user_email",
-          u."createdAt" AS "user_createdAt",
-          u."updatedAt" AS "user_updatedAt"
-        FROM inserted t
-        LEFT JOIN "User" u ON u."id" = t."userId"
+        ${taskWithRelationsSelect.replace('FROM "Task" t', 'FROM inserted t')}
       `,
       [
         createCuid(),
+        parsed.data.teamId,
         parsed.data.title,
         parsed.data.description ?? null,
         parsed.data.status ?? "PENDING",
         parsed.data.priority ?? "MEDIUM",
-        parsed.data.userId ?? null,
+        assigneeId,
       ]
     );
 

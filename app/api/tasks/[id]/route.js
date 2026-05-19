@@ -1,67 +1,60 @@
+import { requireTeamMember, requireUser } from "@/lib/auth";
 import { mapTask, query } from "@/lib/db";
 import { updateTaskSchema } from "@/lib/validations";
-import { jsonOk, jsonError, handleZodError, handleDatabaseError } from "@/lib/api-helpers";
+import { getTaskForTeam, taskWithRelationsSelect } from "@/lib/team-queries";
+import { handleDatabaseError, handleZodError, jsonError, jsonOk } from "@/lib/api-helpers";
 
-const taskWithUserSelect = `
-  SELECT
-    t."id",
-    t."title",
-    t."description",
-    t."status",
-    t."priority",
-    t."createdAt",
-    t."updatedAt",
-    t."userId",
-    u."id" AS "user_id",
-    u."name" AS "user_name",
-    u."email" AS "user_email",
-    u."createdAt" AS "user_createdAt",
-    u."updatedAt" AS "user_updatedAt"
-  FROM "Task" t
-  LEFT JOIN "User" u ON u."id" = t."userId"
-`;
+async function getTaskScope(taskId, userId) {
+  const [task] = await query(
+    `
+      SELECT t."id", t."teamId"
+      FROM "Task" t
+      INNER JOIN "TeamMember" tm ON tm."teamId" = t."teamId" AND tm."userId" = $2
+      WHERE t."id" = $1
+    `,
+    [taskId, userId]
+  );
 
-// GET /api/tasks/[id] - Detalle de una tarea
+  return task;
+}
+
 export async function GET(request, { params }) {
+  const { response, user } = await requireUser();
+  if (response) return response;
+
   try {
     const { id } = await params;
-    const [task] = await query(`${taskWithUserSelect} WHERE t."id" = $1`, [id]);
+    const scope = await getTaskScope(id, user.id);
 
-    if (!task) {
+    if (!scope) {
       return jsonError("Tarea no encontrada", 404);
     }
 
-    return jsonOk({ task: mapTask(task) });
+    const task = await getTaskForTeam(id, scope.teamId);
+
+    return jsonOk({ task });
   } catch (error) {
     console.error("[GET /api/tasks/:id]", error);
     return jsonError("Error interno del servidor", 500);
   }
 }
 
-// PUT /api/tasks/[id] - Actualizar una tarea
 export async function PUT(request, { params }) {
+  const { response, user } = await requireUser();
+  if (response) return response;
+
   try {
     const { id } = await params;
-    const body = await request.json();
-    const parsed = updateTaskSchema.safeParse(body);
+    const scope = await getTaskScope(id, user.id);
 
-    if (!parsed.success) {
-      return handleZodError(parsed.error);
-    }
-
-    const [existing] = await query('SELECT "id" FROM "Task" WHERE "id" = $1', [id]);
-    if (!existing) {
+    if (!scope) {
       return jsonError("Tarea no encontrada", 404);
     }
 
-    if (parsed.data.userId !== undefined && parsed.data.userId !== null) {
-      const [userExists] = await query('SELECT "id" FROM "User" WHERE "id" = $1', [
-        parsed.data.userId,
-      ]);
+    const parsed = updateTaskSchema.safeParse(await request.json());
 
-      if (!userExists) {
-        return jsonError("El usuario asignado no existe", 400);
-      }
+    if (!parsed.success) {
+      return handleZodError(parsed.error);
     }
 
     const updates = [];
@@ -87,9 +80,19 @@ export async function PUT(request, { params }) {
       updates.push(`"priority" = $${values.length}::"TaskPriority"`);
     }
 
-    if (parsed.data.userId !== undefined) {
-      values.push(parsed.data.userId);
-      updates.push(`"userId" = $${values.length}`);
+    if (parsed.data.autoAssign) {
+      values.push(user.id);
+      updates.push(`"assigneeId" = $${values.length}`);
+    } else if (parsed.data.assigneeId !== undefined) {
+      if (parsed.data.assigneeId !== null) {
+        const forbidden = await requireTeamMember(scope.teamId, parsed.data.assigneeId);
+        if (forbidden) {
+          return jsonError("El responsable debe pertenecer al equipo", 400);
+        }
+      }
+
+      values.push(parsed.data.assigneeId);
+      updates.push(`"assigneeId" = $${values.length}`);
     }
 
     if (updates.length) {
@@ -104,7 +107,7 @@ export async function PUT(request, { params }) {
       );
     }
 
-    const [task] = await query(`${taskWithUserSelect} WHERE t."id" = $1`, [id]);
+    const [task] = await query(`${taskWithRelationsSelect} WHERE t."id" = $1`, [id]);
 
     return jsonOk({ task: mapTask(task) });
   } catch (error) {
@@ -116,22 +119,19 @@ export async function PUT(request, { params }) {
   }
 }
 
-// DELETE /api/tasks/[id] - Eliminar una tarea
 export async function DELETE(request, { params }) {
+  const { response, user } = await requireUser();
+  if (response) return response;
+
   try {
     const { id } = await params;
-    const [deleted] = await query(
-      `
-        DELETE FROM "Task"
-        WHERE "id" = $1
-        RETURNING "id"
-      `,
-      [id]
-    );
+    const scope = await getTaskScope(id, user.id);
 
-    if (!deleted) {
+    if (!scope) {
       return jsonError("Tarea no encontrada", 404);
     }
+
+    await query('DELETE FROM "Task" WHERE "id" = $1', [id]);
 
     return jsonOk({ message: "Tarea eliminada correctamente" });
   } catch (error) {

@@ -1,6 +1,6 @@
 # GestorTareas
 
-Aplicacion web para gestionar tareas de equipo. Incluye API REST con Next.js Route Handlers, persistencia en PostgreSQL via Neon Serverless y una UI responsive para crear, filtrar, cambiar estado y eliminar tareas.
+Aplicacion web para gestionar tareas por equipos. Incluye autenticacion, seleccion de tablero por equipo, invitaciones por email, asignacion de responsables, auto-asignacion opcional y CRUD de tareas/equipos con persistencia PostgreSQL.
 
 ## Stack
 
@@ -8,8 +8,9 @@ Aplicacion web para gestionar tareas de equipo. Incluye API REST con Next.js Rou
 - Tailwind CSS 4 para estilos utilitarios.
 - Neon Serverless Postgres para persistencia real.
 - Zod para validacion de entrada en la API.
+- Autenticacion propia con cookie HTTP-only, sesiones persistidas y hash de contrasena con `scrypt` de Node.js.
 
-Se eligio Next.js porque permite entregar frontend y backend en un unico proyecto JavaScript, con rutas API cercanas a la UI y una estructura sencilla para una prueba tecnica pequena. Neon encaja bien porque ofrece PostgreSQL real sin levantar infraestructura local.
+Se eligio Next.js porque permite entregar frontend y backend en un unico proyecto JavaScript, con rutas API cercanas a la UI. Neon aporta PostgreSQL real sin infraestructura local, y `scrypt` evita anadir dependencias para una prueba tecnica pequena.
 
 ## Arranque
 
@@ -33,6 +34,14 @@ DATABASE_URL="postgresql://usuario:password@host/database?sslmode=require"
 pnpm seed
 ```
 
+Usuarios demo:
+
+- `alice@example.com`
+- `bob@example.com`
+- `charlie@example.com`
+
+Contrasena para todos: `password123`.
+
 5. Arranca el entorno local:
 
 ```bash
@@ -43,29 +52,41 @@ La app queda disponible en `http://localhost:3000`.
 
 ## API
 
-- `GET /api/tasks`: lista tareas. Filtros: `status`, `priority`, `userId`, `q`.
-- `POST /api/tasks`: crea una tarea.
-- `GET /api/tasks/:id`: detalle de una tarea.
-- `PUT /api/tasks/:id`: actualiza parcialmente una tarea.
+- `GET /api/auth/me`: devuelve usuario actual, equipos e invitaciones pendientes.
+- `POST /api/auth/register`: registra usuario e inicia sesion.
+- `POST /api/auth/login`: inicia sesion.
+- `POST /api/auth/logout`: cierra sesion.
+- `GET /api/teams`: lista equipos del usuario autenticado.
+- `POST /api/teams`: crea equipo y agrega al creador como miembro.
+- `GET /api/teams/:id`: detalle de equipo si el usuario es miembro.
+- `PUT /api/teams/:id`: actualiza nombre/descripcion del equipo.
+- `DELETE /api/teams/:id`: elimina equipo, miembros, invitaciones y tareas por cascada.
+- `GET /api/teams/:id/members`: lista miembros del equipo.
+- `GET /api/teams/:id/invitations`: lista invitaciones del equipo.
+- `POST /api/teams/:id/invitations`: invita por email.
+- `POST /api/invitations/:id/accept`: acepta una invitacion pendiente del usuario.
+- `GET /api/tasks`: lista tareas. Requiere `teamId`; filtros: `status`, `priority`, `assigneeId`, `q`.
+- `POST /api/tasks`: crea una tarea en un equipo, con `assigneeId` opcional o `autoAssign`.
+- `GET /api/tasks/:id`: detalle de tarea visible para miembros del equipo.
+- `PUT /api/tasks/:id`: actualiza estado, prioridad, responsable, titulo o descripcion.
 - `DELETE /api/tasks/:id`: elimina una tarea.
-- `GET /api/users`: lista usuarios con contador de tareas.
-- `POST /api/users`: crea un usuario.
-- `GET /api/users/:id`: detalle de usuario con tareas.
-- `DELETE /api/users/:id`: elimina un usuario y desasigna sus tareas.
+- `GET /api/users`: lista usuarios visibles en equipos compartidos.
+- `GET /api/users/:id`: detalle de usuario visible y sus tareas compartidas.
 
 ## Decisiones tecnicas
 
-- La UI principal vive en `app/task-board.tsx` como componente cliente porque necesita filtros interactivos, formularios y mutaciones optimistas.
-- `app/page.tsx` se mantiene fino y solo compone el tablero.
-- La API usa SQL parametrizado mediante `lib/db.js` para evitar inyeccion y centralizar el mapeo de filas.
-- Las validaciones estan en `lib/validations.js`; los errores salen con formato consistente desde `lib/api-helpers.js`.
-- Se agregaron filtros de prioridad y busqueda textual para que el tablero sea util cuando crece el numero de tareas.
-- El diseno prioriza una experiencia operativa: metricas arriba, formulario y filtros persistentes, columnas por estado y acciones directas en cada tarea.
+- El equipo es la frontera de acceso: cualquier operacion de tarea valida sesion y pertenencia al equipo.
+- No hay roles; todos los miembros pueden crear, editar, invitar y eliminar, tal como pide el alcance actual.
+- `TeamMember` y `Task` usan `ON DELETE CASCADE` desde `Team`, asi eliminar un equipo borra participantes, invitaciones y tareas.
+- Las tareas usan `assigneeId` nullable para permitir tareas sin responsable.
+- La UI principal vive en `app/task-board.tsx` como componente cliente porque concentra formularios, filtros y mutaciones.
+- Las consultas comunes de equipo/tareas se centralizan en `lib/team-queries.js`; autenticacion y checks de membresia viven en `lib/auth.js`.
+- La API usa SQL parametrizado mediante `lib/db.js` para evitar inyeccion y centralizar mapeos.
 
 ## Herramientas y ayudas
 
-- Se uso IA para revisar los requisitos del `CLAUDE.md`, `AGENTS.md` y `.agents`, disenar la UX e implementar los cambios.
-- Se siguieron las guias locales de `.agents/skills/frontend-design`, `.agents/skills/next-best-practices`, `.agents/skills/react-best-practices` y `.agents/skills/tailwind-css-patterns`.
+- Se uso IA para revisar `CLAUDE.md`, `AGENTS.md`, la carpeta `agents` y las skills de `.agents`.
+- Se aplicaron las guias locales de `frontend-design`, `next-best-practices`, `nodejs-backend-patterns` y `tailwind-css-patterns`.
 - No se copiaron plantillas externas para la interfaz.
 
 ## Verificacion
@@ -79,7 +100,7 @@ Ambos comandos se ejecutaron correctamente.
 
 ## Pendiente con mas tiempo
 
-- Tests automatizados para Route Handlers y flujos principales de UI.
-- Edicion completa de titulo, descripcion, prioridad y responsable desde la tarjeta.
-- Paginacion o scroll virtual si el volumen de tareas crece mucho.
-- Autenticacion y permisos por rol para equipos reales.
+- Tests automatizados de Route Handlers y flujos principales de UI.
+- Flujo para rechazar/cancelar invitaciones.
+- Recuperacion de contrasena y endurecimiento extra de seguridad para produccion.
+- Auditoria visual con Playwright en varios breakpoints.
