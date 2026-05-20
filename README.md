@@ -36,11 +36,11 @@ pnpm seed
 
 Usuarios demo:
 
-- `alice@example.com`
-- `bob@example.com`
-- `charlie@example.com`
+- `albert@gmail.com`
+- `joaquin@gmail.com`
 
-Contrasena para todos: `password123`.
+Contrasena para albert: `albert1234`.
+Contrasena para joaquin: `joaquin1234`.
 
 5. Arranca el entorno local:
 
